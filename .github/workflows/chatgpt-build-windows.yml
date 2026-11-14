@@ -1,0 +1,100 @@
+name: Build CemuExtend Windows x64
+
+on:
+  push:
+    branches:
+      - chatgpt-build-windows
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/dependencies/vcpkg
+  VCPKG_BINARY_SOURCES: 'clear;nuget,GitHub,readwrite'
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+  BUILD_MODE: release
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.29.0'
+
+      - name: Cache CEF archive
+        uses: actions/cache@v5
+        with:
+          path: dependencies/.cef-downloads
+          key: cef-windows64-${{ hashFiles('cmake/CefVersion.cmake') }}
+
+      - name: Fetch CEF SDK
+        shell: bash
+        run: scripts/fetch-cef-windows-x64.sh
+
+      - name: Bootstrap vcpkg
+        shell: cmd
+        run: .\dependencies\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Setup NuGet credentials for vcpkg
+        shell: bash
+        run: |
+          nuget="$(./dependencies/vcpkg/vcpkg.exe fetch nuget | tail -n 1)"
+          "$nuget" sources add \
+            -source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            -storepasswordincleartext \
+            -name "GitHub" \
+            -username "${{ github.repository_owner }}" \
+            -password "${{ secrets.GITHUB_TOKEN }}"
+          "$nuget" setapikey "${{ secrets.GITHUB_TOKEN }}" \
+            -source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCEMU_FRONTEND=cef \
+            -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Build CemuExtend
+        shell: pwsh
+        run: cmake --build build --config Release
+
+      - name: Run tests
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Prepare executable
+        shell: pwsh
+        run: Rename-Item bin/Cemu_release.exe Cemu.exe
+
+      - name: Verify runtime files
+        shell: pwsh
+        run: |
+          @(
+            'bin/Cemu.exe',
+            'bin/libcef.dll',
+            'bin/chrome_elf.dll',
+            'bin/icudtl.dat',
+            'bin/resources.pak',
+            'bin/locales',
+            'bin/cef-swiftshader/vulkan-1.dll'
+          ) | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "Missing required runtime file: $_" }
+          }
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v6
+        with:
+          name: CemuExtend-Windows-x64
+          path: ./bin
+          if-no-files-found: error
